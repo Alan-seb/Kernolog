@@ -146,6 +146,6 @@ All contributions must comply with the GPLv3 license.
 
 ---
 
-**Author:** [Your Name]
+**Author:** Rithik A Nair
 **Year:** 2025
 🧠 *Built for live semantic log exploration.*
