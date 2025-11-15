@@ -1,151 +1,221 @@
-# 🧠 Live Log Embedding System (journalctl → FAISS)
+# Kernolog — Batch-Manager
 
-A real-time Linux log monitoring and semantic search tool that streams logs from `journalctl`, deduplicates repeated entries, embeds them using SentenceTransformer, and indexes them with FAISS for fast similarity search.
+## 🎯 Overview
 
----
+This branch of Kernolog enhances live system log monitoring by implementing a **LogZip-inspired template-extraction and batching system**, enabling you to filter noise, highlight new patterns and rapidly summarise recurring log events.This can be connected to db.py to make semantic search smarter.
 
-## 🚀 Features
+Rather than simply streaming and indexing logs, this pipeline:
 
-* **Real-time log streaming:** Follows live logs with `journalctl -f`.
-* **Smart deduplication:** Strips volatile fields (timestamps, PIDs, hostnames) for repeat detection.
-* **Batch summarization:** Groups frequent identical messages every 10 seconds into compact summaries like
-  `⏱ 2025-11-11 | "systemd: service failed" repeated 42x`.
-* **Vector embeddings:** Converts logs into semantic embeddings using `all-MiniLM-L6-v2`.
-* **FAISS indexing:** Enables fast similarity search across all stored logs.
-* **Interactive search:** Query logs with natural language and adjustable top-K (`k=5`, `k=10`, etc.).
-* **Multithreaded:** Separate threads for log ingestion, deduplication, embedding, and indexing.
+* Collects logs from systemd via `journalctl`
+* Extracts templates by replacing dynamic parts with wildcards
+* Groups templates by component (unit)
+* Distinguishes *new* versus *repeated* log patterns
+* Stores metadata in SQLite for efficient querying and summarisation
 
----
+## 🚀 Why this matters
 
-## 🧩 Tech Stack
+System logs often contain massive repetitive noise. By extracting templates and batching recurring patterns:
 
-| Component                                     | Purpose                               |
-| --------------------------------------------- | ------------------------------------- |
-| **Python 3.9+**                               | Core runtime                          |
-| **journalctl**                                | Log streaming                         |
-| **SentenceTransformers (`all-MiniLM-L6-v2`)** | Text embedding                        |
-| **FAISS**                                     | Vector indexing and similarity search |
-| **threading / queue**                         | Concurrent processing pipeline        |
+* You can **focus on the unusual or new log types**
+* **Reduce storage/use of resources** by deduplicating at the template level
+* Gain **early detection of new anomalous log flows**
+* Organise logs by component/unit for easier root-cause discovery
 
----
+## 📋 System Requirements
 
-## ⚙️ Installation
+* Linux with systemd (so `journalctl` is available)
+* Python 3.6+
+* SQLite3 (for business-logic storage)
+* No external UI or service required (pure Python + SQLite)
 
-1. **Clone this repository**
+## 🏗 Architecture & Pipeline
 
-   ```bash
-   git clone https://github.com/Tonystank2/Kernolog
-   cd Kernolog
-   ```
+```
+┌─────────────────┐
+│ journalctl -f   │ (streams live logs)
+└──────┬──────────┘
+       │
+       ▼
+┌─────────────────┐
+│ raw_logs.py     │ (collects raw logs → logs.db: journal_logs)
+└──────┬───────────┘
+       │
+       ▼
+┌─────────────────┐
+│ clean.py        │ (template extraction → logs.db: templates + log_instances)
+└──────┬───────────┘
+       │
+       ▼
+┌─────────────────┐
+│ batchgrper.py   │ (group templates by component → batches.db)
+└──────┬───────────┘
+       │
+       ▼
+┌─────────────────┐
+│ batchmanager.py │ (analysis: new vs repeated logs)
+└────────▲────────┘
+         │
+┌────────┴────────┐
+│ sequencer.py     │ (orchestrates loop)
+└──────────────────┘
+```
 
-2. **Install dependencies**
+## 📁 Files & Purpose
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+### `raw_logs.py`
 
-3. **Run the system**
+* Streams logs via: `journalctl -f -o json`
+* Parses JSON entries (timestamp, unit, PID, priority, message)
+* Batches into `logs.db` in table `journal_logs` (raw logs)
+* Buffering: e.g., batching every 50 entries, queue size up to 5000, restart logic
 
-   ```bash
-   python3 db.py
-   ```
+### `clean.py`
 
----
+* Incrementally reads new entries in `journal_logs`
+* Extracts **templates** by replacing dynamic parts:
 
-## 🔍 Usage
+  * Numbers (`\b\d+\b`) → `*`
+  * Paths (`/…`) → `*`
+* Inserts unique templates into `templates` table (`template_id`, `template`)
+* Inserts each log instance into `log_instances` with `template_id` + JSON parameters
 
-When running, the system automatically:
+### `batchgrper.py`
 
-* Streams system logs via `journalctl -f`
-* Deduplicates repeated messages
-* Generates embeddings and stores them in a FAISS index
+* Reads from `templates` + `log_instances`
+* Groups template IDs per “component” (e.g., `unit` from systemd)
+* Stores mapping in `batches.db` in `component_templates` (component → list of template IDs)
 
-You can then query interactively:
+### `batchmanager.py`
+
+* Processes logs in groups (e.g., batches of 20)
+* For each log:
+
+  * Looks up component’s known templates
+  * If template is **new**: marks as new, shows full message
+  * If template is **known**: marks as repeated, shows compressed summary (“x 5” etc)
+* Reports grouped results with clear “new” vs “repeated” sections
+
+### `sequencer.py`
+
+* Orchestrator: runs the other scripts in loop with configurable sleep interval (default ~2 s)
+* Ensures incremental and continuous processing
+* Handles orderly shutdown (Ctrl+C)
+
+## 📊 Database Schemas
+
+### `logs.db`
+
+#### `journal_logs`
+
+```sql
+id         INTEGER PRIMARY KEY AUTOINCREMENT
+timestamp  TEXT
+unit       TEXT     -- e.g., "sshd.service"
+pid        INTEGER
+priority   INTEGER
+message    TEXT
+```
+
+#### `templates`
+
+```sql
+id        TEXT PRIMARY KEY   -- e.g., "T1", "T2"
+template  TEXT               -- pattern with wildcards: “Started session * for user *”
+```
+
+#### `log_instances`
+
+```sql
+log_id     INTEGER PRIMARY KEY
+template_id TEXT             -- foreign key → templates.id
+parameters  TEXT             -- JSON array of extracted values
+```
+
+### `batches.db`
+
+#### `component_templates`
+
+```sql
+component  TEXT PRIMARY KEY    -- systemd unit, e.g., "sshd.service"
+templates  TEXT              -- newline-separated list of template IDs or template strings
+```
+
+## 🎮 Usage
+
+### 1. Launch Raw Log Collection
 
 ```bash
-Enter search query (or 'exit' to quit): failed service restart k=10 display=pretty
+python3 raw_logs.py &
 ```
 
-### Options
+Keeps streaming logs into `logs.db`.
 
-| Parameter        | Description                                      | Example       |
-| ---------------- | ------------------------------------------------ | ------------- |
-| `k=<N>`          | Number of top results to display                 | `k=10`        |
-| `display=raw`    | Show only log text                               | `display=raw` |
-| `display=pretty` | Show timestamps, distances, and formatted output | *(default)*   |
+### 2. Launch Pipeline (live mode)
 
----
-
-## 🧠 Example Output
-
-```
---------------------------------------------------------------------------------
-Top 5 results (display=pretty):
-1731327900.231 | dist=0.121 | systemd: ollama.service failed
-1731327902.481 | dist=0.188 | ⏱ 2025-11-11 | "systemd: ollama.service failed" repeated 3x
-1731327908.912 | dist=0.223 | systemd: docker.service stopped
---------------------------------------------------------------------------------
+```bash
+python3 sequencer.py
 ```
 
----
+It will run continuously: clean → group → manage, updating every cycle (default ~2 s).
 
-## 🧰 Configuration
+### 3. Manual Step-by-Step (optional)
 
-You can tweak parameters directly in `db.py`:
-
-| Variable           | Default            | Description                      |
-| ------------------ | ------------------ | -------------------------------- |
-| `EMBED_MODEL_NAME` | `all-MiniLM-L6-v2` | SentenceTransformer model        |
-| `BATCH_SIZE`       | `16`               | Embedding batch size             |
-| `DEFAULT_K`        | `5`                | Default number of search results |
-| `FLUSH_INTERVAL`   | `10`               | Seconds between repeat summaries |
-
----
-
-## 🧑‍💻 Architecture Overview
-
-```text
-┌────────────────────┐
-│ journalctl -f      │  ← stream logs
-└─────────┬──────────┘
-          │
-          ▼
-  normalize_log() ──► repeat_cache ──► repeat_flusher()
-          │                             │
-          ▼                             ▼
-       log_queue ────────────────► embed_worker() ──► FAISS index
-                                         │
-                                         ▼
-                                   search_query()
+```bash
+python3 clean.py
+python3 batchgrper.py
+python3 batchmanager.py
 ```
 
----
+### 4. Run with Custom Interval
 
-## 🧾 License
+```bash
+python3 sequencer.py --interval 10
+```
 
-This project is licensed under the **GNU General Public License v3.0 (GPLv3)** — see the [LICENSE](./LICENSE) file for details.
+Sets 10 s between cycles.
 
-> You are free to use, modify, and distribute this software,
-> provided that any derivative works are also released under the GPL.
+## 📈 Example Output
 
----
+```
+[CYCLE 42] 14:32:15
+  ✓ Extract templates → Processed 127 log instances
+  ✓ Group by component → Components processed: 18
 
-## 🤝 Contributing
+=== GROUP 1 ===
 
-Pull requests are welcome!
-If you make improvements or find issues, please open an issue or PR.
-All contributions must comply with the GPLv3 license.
+new:
+     systemd-logind.service: New session 12 opened for user alice
+     NetworkManager.service: Connected to WiFi network "Office-5G"
 
----
+repeated:
+    this sshd.service gave same log as component_templates.sshd.service line 3 x8
+    this systemd.service gave same log as component_templates.systemd.service line 1 x15
+```
 
-## 💬 Acknowledgments
+## 🔧 Configuration
 
-* [SentenceTransformers](https://www.sbert.net/)
-* [FAISS](https://faiss.ai/)
-* [Systemd journalctl](https://man7.org/linux/man-pages/man1/journalctl.1.html)
+Adjust these constants inside the respective scripts:
 
----
+**`raw_logs.py`**
 
-**Author:** Rithik A Nair
-**Year:** 2025
-🧠 *Built for live semantic log exploration.*
+```python
+QUEUE_MAX_SIZE = 5000    # max logs in memory
+BATCH_SIZE     = 50      # inserts per commit
+RESTART_DELAY  = 5       # seconds before restarting journalctl
+```
+
+**`batchmanager.py`**
+
+```python
+GROUP_SIZE = 20          # number of logs processed per batch
+```
+
+**`sequencer.py`**
+
+```python
+time.sleep(2)             # seconds between pipeline cycles
+```
+
+## 🔮 Future Enhancements
+
+* Connecting this architecture to db.py to reduce the noise and put whats actually neccessary.
