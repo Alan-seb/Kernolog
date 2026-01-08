@@ -1,12 +1,17 @@
-# 🧠 Live Log Embedding System (journalctl → FAISS)
+# 🧠 Live Log Embedding System (Linux/macOS → FAISS)
 
-A real-time Linux log monitoring and semantic search tool that streams logs from `journalctl`, deduplicates repeated entries, embeds them using SentenceTransformer, and indexes them with FAISS for fast similarity search.
+A real-time log monitoring and semantic search tool that streams system logs, deduplicates repeated entries, embeds them using SentenceTransformer, and indexes them with FAISS for fast similarity search.
+
+**Supports both Linux (`journalctl`) and macOS (`log stream`).**
+
 
 ---
 
 ## 🚀 Features
 
-* **Real-time log streaming:** Follows live logs with `journalctl -f`.
+* **Real-time log streaming:** 
+  - Linux: Follows live logs with `journalctl -f`
+  - macOS: Follows live logs with `log stream`
 * **Smart deduplication:** Strips volatile fields (timestamps, PIDs, hostnames) for repeat detection.
 * **Batch summarization:** Groups frequent identical messages every 10 seconds into compact summaries like
   `⏱ 2025-11-11 | "systemd: service failed" repeated 42x`.
@@ -15,6 +20,7 @@ A real-time Linux log monitoring and semantic search tool that streams logs from
 * **Interactive search:** Query logs with natural language and adjustable top-K (`k=5`, `k=10`, etc.).
 * **Multithreaded:** Separate threads for log ingestion, deduplication, embedding, and indexing.
 
+
 ---
 
 ## 🧩 Tech Stack
@@ -22,10 +28,12 @@ A real-time Linux log monitoring and semantic search tool that streams logs from
 | Component                                     | Purpose                               |
 | --------------------------------------------- | ------------------------------------- |
 | **Python 3.9+**                               | Core runtime                          |
-| **journalctl**                                | Log streaming                         |
+| **journalctl** (Linux)                        | Log streaming on Linux                |
+| **log stream** (macOS)                        | Log streaming on macOS                |
 | **SentenceTransformers (`all-MiniLM-L6-v2`)** | Text embedding                        |
 | **FAISS**                                     | Vector indexing and similarity search |
 | **threading / queue**                         | Concurrent processing pipeline        |
+
 
 ---
 
@@ -46,8 +54,14 @@ A real-time Linux log monitoring and semantic search tool that streams logs from
 
 3. **Run the system**
 
+   **On Linux:**
    ```bash
    python3 db.py
+   ```
+
+   **On macOS:**
+   ```bash
+   python3 db_macos.py
    ```
 
 ---
@@ -56,9 +70,10 @@ A real-time Linux log monitoring and semantic search tool that streams logs from
 
 When running, the system automatically:
 
-* Streams system logs via `journalctl -f`
+* Streams system logs (via `journalctl -f` on Linux or `log stream` on macOS)
 * Deduplicates repeated messages
 * Generates embeddings and stores them in a FAISS index
+
 
 You can then query interactively:
 
@@ -105,9 +120,10 @@ You can tweak parameters directly in `db.py`:
 ## 🧑‍💻 Architecture Overview
 
 ```text
-┌────────────────────┐
-│ journalctl -f      │  ← stream logs
-└─────────┬──────────┘
+┌────────────────────────────┐
+│ journalctl -f (Linux)      │  ← stream logs
+│ log stream (macOS)         │
+└─────────┬──────────────────┘
           │
           ▼
   normalize_log() ──► repeat_cache ──► repeat_flusher()
@@ -118,6 +134,7 @@ You can tweak parameters directly in `db.py`:
                                          ▼
                                    search_query()
 ```
+
 
 ---
 
